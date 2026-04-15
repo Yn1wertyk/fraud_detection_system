@@ -11,8 +11,11 @@ from features import build_features
 
 RANDOM_STATE = 45
 
-# Шлях до CSV датасету за замовчуванням
-DEFAULT_DATA_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "synthetic_fraud_dataset.csv")
+# Абсолютні шляхи відносно розташування цього файлу
+SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.join(SRC_DIR, "..")
+DEFAULT_DATA_PATH = os.path.join(PROJECT_DIR, "data", "synthetic_fraud_dataset.csv")
+MODELS_DIR = os.path.join(PROJECT_DIR, "models")
 
 
 def train_model(data_path: str = DEFAULT_DATA_PATH, target_col: str = "is_fraud"):
@@ -98,7 +101,8 @@ def train_model(data_path: str = DEFAULT_DATA_PATH, target_col: str = "is_fraud"
     print(f"Середній PR-AUC: {np.mean(ap_scores):.4f} ± {np.std(ap_scores):.4f}")
 
     # Збереження
-    os.makedirs("models", exist_ok=True)
+    os.makedirs(MODELS_DIR, exist_ok=True)
+    model_out_path = os.path.join(MODELS_DIR, "fraud_model.pkl")
     model_data = {
         "model": best_model,
         "features": list(X.columns),
@@ -107,8 +111,8 @@ def train_model(data_path: str = DEFAULT_DATA_PATH, target_col: str = "is_fraud"
         "feature_importance": dict(zip(X.columns, best_model.feature_importances_))
     }
 
-    joblib.dump(model_data, "models/fraud_model.pkl")
-    print("\nМодель збережена в models/fraud_model.pkl")
+    joblib.dump(model_data, model_out_path)
+    print(f"\nМодель збережена в {model_out_path}")
 
     # Візуалізація важливості ознак
     plot_feature_importance(best_model, X.columns)
@@ -116,7 +120,7 @@ def train_model(data_path: str = DEFAULT_DATA_PATH, target_col: str = "is_fraud"
     return best_model, ap_scores
 
 
-def plot_feature_importance(model, feature_names, top_n: int = 20):
+def plot_feature_importance(model, feature_names, top_n: int = 20, out_dir: str = MODELS_DIR):
     """
     Візуалізація топ-N найважливіших ознак.
     """
@@ -135,10 +139,11 @@ def plot_feature_importance(model, feature_names, top_n: int = 20):
         ha="right"
     )
     plt.tight_layout()
-    os.makedirs("models", exist_ok=True)
-    plt.savefig("models/feature_importance.png", dpi=150, bbox_inches="tight")
+    os.makedirs(out_dir, exist_ok=True)
+    plot_path = os.path.join(out_dir, "feature_importance.png")
+    plt.savefig(plot_path, dpi=150, bbox_inches="tight")
     plt.close()
-    print("Графік важливості ознак збережено в models/feature_importance.png")
+    print(f"Графік важливості ознак збережено в {plot_path}")
 
 
 if __name__ == "__main__":

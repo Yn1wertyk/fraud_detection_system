@@ -27,7 +27,7 @@ def build_features(df: pd.DataFrame, single: bool = False) -> Tuple[pd.DataFrame
     Returns:
         Tuple[features_df, target_series | None]
     """
-    df = df.copy()
+    df = df.copy().reset_index(drop=True)
 
     # --- Базові числові ознаки ---
     df["amount_log"] = np.log1p(df["amount"])
@@ -59,29 +59,32 @@ def build_features(df: pd.DataFrame, single: bool = False) -> Tuple[pd.DataFrame
         col = f"merchant_{cat.lower()}"
         df[col] = (df["merchant_category"] == cat).astype(int)
 
-    # --- Агрегати по user_id (rolling на основі рядків) ---
-    df_sorted = df.sort_index()  # зберігаємо оригінальний порядок (датасет вже відсортовано)
-
-    df["user_tx_count"] = df.groupby("user_id").cumcount()  # кількість попередніх транзакцій
-
-    df["user_amount_mean"] = df.groupby("user_id")["amount"].transform(
-        lambda x: x.shift(1).expanding().mean()
+    # --- Статистичні агрегати по user_id (глобальні, без витоку) ---
+    user_stats = (
+        df.groupby("user_id")["amount"]
+        .agg(user_amount_mean="mean", user_amount_std="std", user_tx_count="count")
+        .reset_index()
     )
-    df["user_amount_std"] = df.groupby("user_id")["amount"].transform(
-        lambda x: x.shift(1).expanding().std()
-    )
-    df["user_device_risk_mean"] = df.groupby("user_id")["device_risk_score"].transform(
-        lambda x: x.shift(1).expanding().mean()
-    )
+    user_stats["user_amount_std"] = user_stats["user_amount_std"].fillna(0)
+    df = df.merge(user_stats, on="user_id", how="left")
 
-    # Відхилення суми від середнього по користувачу
+    user_risk_stats = (
+        df.groupby("user_id")["device_risk_score"]
+        .mean()
+        .reset_index()
+        .rename(columns={"device_risk_score": "user_device_risk_mean"})
+    )
+    df = df.merge(user_risk_stats, on="user_id", how="left")
+
     df["amount_vs_user_mean"] = df["amount"] / (df["user_amount_mean"].fillna(df["amount"]) + 1e-8)
 
-    # --- Агрегати по merchant_category ---
-    df["merchant_tx_count"] = df.groupby("merchant_category").cumcount()
-    df["merchant_amount_mean"] = df.groupby("merchant_category")["amount"].transform(
-        lambda x: x.shift(1).expanding().mean()
+    # --- Статистичні агрегати по merchant_category (глобальні) ---
+    merchant_stats = (
+        df.groupby("merchant_category")["amount"]
+        .agg(merchant_amount_mean="mean", merchant_tx_count="count")
+        .reset_index()
     )
+    df = df.merge(merchant_stats, on="merchant_category", how="left")
 
     # Вибір фічей для моделі
     feature_cols = [
@@ -115,23 +118,16 @@ def build_features(df: pd.DataFrame, single: bool = False) -> Tuple[pd.DataFrame
     return X, y
 
 
-def prepare_single_transaction(tx_dict: dict, historical_data: pd.DataFrame = None) -> pd.DataFrame:
+def prepare_single_transaction(tx_dict: dict) -> pd.DataFrame:
     """
     Підготовка однієї транзакції для інференсу.
 
     Args:
         tx_dict: словник з полями транзакції
-        historical_data: DataFrame з попередніми транзакціями цього юзера (опційно)
 
     Returns:
         DataFrame з однією строкою готових ознак
     """
     tx_df = pd.DataFrame([tx_dict])
-
-    if historical_data is not None and not historical_data.empty:
-        combined_df = pd.concat([historical_data, tx_df], ignore_index=True)
-        X, _ = build_features(combined_df, single=True)
-        return X.iloc[-1:].copy()
-
     X, _ = build_features(tx_df, single=True)
     return X
