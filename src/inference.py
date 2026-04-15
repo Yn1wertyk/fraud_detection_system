@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import shap
 import os
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional  # Optional використовується у get_detector
 
 from features import prepare_single_transaction
 
@@ -39,20 +39,18 @@ class FraudDetector:
     def predict_single(
         self,
         transaction: Dict[str, Any],
-        historical_data: Optional[pd.DataFrame] = None
     ) -> Dict[str, Any]:
         """
         Прогнозування для однієї транзакції.
 
         Args:
             transaction: словник з полями транзакції
-            historical_data: DataFrame з попередніми транзакціями цього юзера (опційно)
 
         Returns:
             Словник: fraud_probability, decision, risk_level, top_features, explanation
         """
         try:
-            X = prepare_single_transaction(transaction, historical_data)
+            X = prepare_single_transaction(transaction)
 
             # Вирівнюємо колонки з тими, що очікує модель
             for col in self.features:
