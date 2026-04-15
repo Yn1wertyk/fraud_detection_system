@@ -5,7 +5,7 @@ import shap
 import os
 from typing import Dict, Any, Optional  # Optional використовується у get_detector
 
-from features import prepare_single_transaction
+from features import build_features
 
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "fraud_model.pkl")
 
@@ -30,9 +30,14 @@ class FraudDetector:
             self.model_data = joblib.load(model_path)
             self.model = self.model_data["model"]
             self.features = self.model_data["features"]
+            # Поріг, знайдений під час тренування (max F1); fallback = 0.5
+            self.threshold = self.model_data.get("threshold", 0.5)
+            # Агрегати по user_id зі всього тренувального датасету
+            self.user_stats = self.model_data.get("user_stats", None)
             self.explainer = shap.TreeExplainer(self.model)
             print(f"Модель завантажена: {model_path}")
             print(f"Кількість ознак: {len(self.features)}")
+            print(f"Поріг прийняття рішення: {self.threshold:.4f}")
         except Exception as e:
             raise RuntimeError(f"Помилка завантаження моделі: {e}")
 
@@ -50,7 +55,10 @@ class FraudDetector:
             Словник: fraud_probability, decision, risk_level, top_features, explanation
         """
         try:
-            X = prepare_single_transaction(transaction)
+            tx_df = pd.DataFrame([transaction])
+            # Якщо є збережена статистика по юзерах — використовуємо її,
+            # щоб агрегати при інференсі відповідали тим, що бачила модель
+            X, _ = build_features(tx_df, single=True, user_stats=self.user_stats)
 
             # Вирівнюємо колонки з тими, що очікує модель
             for col in self.features:
@@ -86,10 +94,13 @@ class FraudDetector:
                 "explanation": f"Помилка обробки транзакції: {e}"
             }
 
-        # Бізнес-рішення
-        if fraud_proba >= 0.8:
+        # Бізнес-рішення на основі збереженого оптимального порогу
+        high_threshold = self.threshold
+        review_threshold = self.threshold * 0.6  # нижча зона — на перевірку
+
+        if fraud_proba >= high_threshold:
             decision, risk_level = "BLOCK", "HIGH"
-        elif fraud_proba >= 0.5:
+        elif fraud_proba >= review_threshold:
             decision, risk_level = "REVIEW", "MEDIUM"
         else:
             decision, risk_level = "ALLOW", "LOW"
