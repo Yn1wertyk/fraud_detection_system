@@ -84,6 +84,10 @@ def build_features(
     """
     df = _base_features(df).reset_index(drop=True)
 
+    # Приводимо user_id до рядка в df, щоб merge завжди працював
+    # незалежно від того, чи прийшов user_id як int чи str
+    df["user_id"] = df["user_id"].astype(str)
+
     if user_stats is None:
         # Тренування: рахуємо по наявних рядках
         stats = (
@@ -97,8 +101,11 @@ def build_features(
             .reset_index()
         )
         stats["user_amount_std"] = stats["user_amount_std"].fillna(0)
+        stats["user_id"] = stats["user_id"].astype(str)
         df = df.merge(stats, on="user_id", how="left")
     else:
+        user_stats = user_stats.copy()
+        user_stats["user_id"] = user_stats["user_id"].astype(str)
         df = df.merge(user_stats, on="user_id", how="left")
 
     df["user_tx_count"] = df["user_tx_count"].fillna(1)
@@ -145,6 +152,7 @@ def compute_user_stats(df: pd.DataFrame) -> pd.DataFrame:
         .reset_index()
     )
     stats["user_amount_std"] = stats["user_amount_std"].fillna(0)
+    stats["user_id"] = stats["user_id"].astype(str)
     return stats
 
 
