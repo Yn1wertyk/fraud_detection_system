@@ -1,88 +1,158 @@
 import pandas as pd
 import numpy as np
-from datetime import datetime, timedelta
 from typing import Tuple, Optional
 
-def build_features(df: pd.DataFrame, single: bool = False) -> Tuple[pd.DataFrame, Optional[pd.Series]]:
-    """
-    Побудова ознак для виявлення фінансових махінацій
-    
-    Args:
-        df: DataFrame з транзакціями
-        single: True якщо обробляємо одну транзакцію для інференсу
-    
-    Returns:
-        Tuple[features_df, target_series]
-    """
+TRANSACTION_TYPES = ["ATM", "Online", "POS", "QR", "Transfer"]
+MERCHANT_CATEGORIES = [
+    "Clothing", "Electronics", "Food", "Gambling",
+    "Grocery", "Travel", "Utilities", "Other"
+]
+
+HIGH_RISK_COUNTRIES = {"TR", "NG", "IN", "RU", "CN", "PK"}
+
+BASE_FEATURES = [
+    "amount",
+    "amount_log",
+    "hour",
+    "is_night",
+    "is_business_hours",
+    "is_high_risk_country",
+    "device_risk_score",
+    "ip_risk_score",
+    "combined_risk_score",
+    *[f"tx_type_{t.lower()}" for t in TRANSACTION_TYPES],
+    *[f"merchant_{c.lower()}" for c in MERCHANT_CATEGORIES],
+]
+
+USER_FEATURES = [
+    "user_tx_count",
+    "user_amount_mean",
+    "user_amount_std",
+    "user_device_risk_mean",
+    "amount_vs_user_mean",
+]
+
+
+# ------------------------
+# БАЗОВІ ФІЧІ (безпечні)
+# ------------------------
+def _base_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    
-    # Базові ознаки
-    df['amount_log'] = np.log1p(df['amount'])
-    df['hour'] = pd.to_datetime(df['tx_time']).dt.hour
-    df['day_of_week'] = pd.to_datetime(df['tx_time']).dt.dayofweek
-    df['is_weekend'] = df['day_of_week'].isin([5, 6]).astype(int)
-    df['is_night'] = ((df['hour'] >= 22) | (df['hour'] <= 6)).astype(int)
-    
-    # Часові ознаки (time-aware)
-    df['tx_time'] = pd.to_datetime(df['tx_time'])
-    df = df.sort_values('tx_time')
-    
-    # Ознаки по користувачу за 1 годину
-    df['user_tx_count_1h'] = df.groupby('user_id').apply(
-        lambda group: group.set_index('tx_time').rolling('1h')['amount'].count().shift(1).fillna(0)
-    ).reset_index(level=0, drop=True).reindex(df.index).fillna(0)
-    
-    # Ознаки по мерчанту за 1 годину  
-    df['merchant_tx_count_1h'] = df.groupby('merchant').apply(
-        lambda group: group.set_index('tx_time').rolling('1h')['amount'].count().shift(1).fillna(0)
-    ).reset_index(level=0, drop=True).reindex(df.index).fillna(0)
-    
-    # Ознаки по користувачу за 24 години
-    df['user_amount_mean_24h'] = df.groupby('user_id')['amount'].transform(
-        lambda x: x.shift(1).rolling(window=24, min_periods=1).mean()
+
+    df["amount"] = df["amount"].astype(float)
+    df["amount_log"] = np.log1p(df["amount"])
+
+    df["hour"] = df["hour"].astype(int)
+    df["is_night"] = ((df["hour"] >= 22) | (df["hour"] <= 6)).astype(int)
+    df["is_business_hours"] = ((df["hour"] >= 9) & (df["hour"] <= 17)).astype(int)
+
+    df["device_risk_score"] = df["device_risk_score"].astype(float)
+    df["ip_risk_score"] = df["ip_risk_score"].astype(float)
+
+    # взаємодія
+    df["combined_risk_score"] = (
+        df["device_risk_score"] * df["ip_risk_score"]
     )
-    df['user_amount_std_24h'] = df.groupby('user_id')['amount'].transform(
-        lambda x: x.shift(1).rolling(window=24, min_periods=1).std()
-    )
-    
-    # Правила-флаги
-    df['high_amount_flag'] = (df['amount'] > 1000).astype(int)
-    df['new_device_flag'] = df.groupby('user_id')['device_id'].transform(
-        lambda x: (~x.isin(x.shift(1).dropna())).astype(int)
-    )
-    
-    # Відстань від середнього
-    df['amount_vs_user_mean'] = df['amount'] / (df['user_amount_mean_24h'] + 1e-8)
-    
-    # Вибираємо фічі для моделі
-    feature_cols = [
-        'amount', 'amount_log', 'hour', 'day_of_week', 'is_weekend', 'is_night',
-        'user_tx_count_1h', 'user_amount_mean_24h', 'user_amount_std_24h',
-        'merchant_tx_count_1h', 'high_amount_flag', 'new_device_flag',
-        'amount_vs_user_mean'
-    ]
-    
-    # Заповнюємо NaN
+
+    df["is_high_risk_country"] = df["country"].isin(HIGH_RISK_COUNTRIES).astype(int)
+
+    # one-hot
+    for t in TRANSACTION_TYPES:
+        df[f"tx_type_{t.lower()}"] = (df["transaction_type"] == t).astype(int)
+
+    for c in MERCHANT_CATEGORIES:
+        df[f"merchant_{c.lower()}"] = (df["merchant_category"] == c).astype(int)
+
+    return df
+
+
+# ------------------------
+# USER FEATURES (БЕЗ leakage)
+# ------------------------
+def _apply_user_stats(
+    df: pd.DataFrame,
+    user_stats: Optional[pd.DataFrame]
+) -> pd.DataFrame:
+    df = df.copy()
+    df["user_id"] = df["user_id"].astype(str)
+
+    if user_stats is not None:
+        user_stats = user_stats.copy()
+        user_stats["user_id"] = user_stats["user_id"].astype(str)
+
+        df = df.merge(user_stats, on="user_id", how="left")
+
+    # fallback (НОВА логіка — без leakage)
+    df["user_tx_count"] = df.get("user_tx_count", 1).fillna(1)
+    df["user_amount_mean"] = df.get("user_amount_mean", df["amount"]).fillna(df["amount"])
+    df["user_amount_std"] = df.get("user_amount_std", 0).fillna(0)
+    df["user_device_risk_mean"] = df.get(
+        "user_device_risk_mean",
+        df["device_risk_score"]
+    ).fillna(df["device_risk_score"])
+
+    # стабільний z-score
+    df["amount_vs_user_mean"] = (
+        df["amount"] - df["user_amount_mean"]
+    ) / (df["user_amount_std"] + 1e-6)
+
+    return df
+
+
+# ------------------------
+# MAIN FUNCTION
+# ------------------------
+def build_features(
+    df: pd.DataFrame,
+    user_stats: Optional[pd.DataFrame] = None,
+    single: bool = False,
+) -> Tuple[pd.DataFrame, Optional[pd.Series]]:
+
+    df = _base_features(df)
+    df = _apply_user_stats(df, user_stats)
+
+    feature_cols = BASE_FEATURES + USER_FEATURES
+
     for col in feature_cols:
         if col in df.columns:
             df[col] = df[col].fillna(0)
-    
+
     X = df[feature_cols]
-    y = df['is_fraud'] if 'is_fraud' in df.columns and not single else None
-    
+
+    y = None
+    if not single and "is_fraud" in df.columns:
+        y = df["is_fraud"]
+
     return X, y
 
-def prepare_single_transaction(tx_dict: dict, historical_data: pd.DataFrame = None) -> pd.DataFrame:
-    """
-    Підготовка однієї транзакції для інференсу
-    """
-    tx_df = pd.DataFrame([tx_dict])
-    
-    # Якщо є історичні дані, об'єднуємо для розрахунку агрегатів
-    if historical_data is not None:
-        combined_df = pd.concat([historical_data, tx_df], ignore_index=True)
-        X, _ = build_features(combined_df, single=True)
-        return X.iloc[-1:].copy()  # Повертаємо тільки останню транзакцію
-    else:
-        X, _ = build_features(tx_df, single=True)
-        return X
+
+# ------------------------
+# USER STATS (окремо!)
+# ------------------------
+def compute_user_stats(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["user_id"] = df["user_id"].astype(str)
+
+    stats = (
+        df.groupby("user_id")
+        .agg(
+            user_amount_mean=("amount", "mean"),
+            user_amount_std=("amount", "std"),
+            user_tx_count=("amount", "count"),
+            user_device_risk_mean=("device_risk_score", "mean"),
+        )
+        .reset_index()
+    )
+
+    stats["user_amount_std"] = stats["user_amount_std"].fillna(0)
+
+    return stats
+
+
+# ------------------------
+# SINGLE TRANSACTION
+# ------------------------
+def prepare_single_transaction(tx_dict: dict) -> pd.DataFrame:
+    df = pd.DataFrame([tx_dict])
+    X, _ = build_features(df, user_stats=None, single=True)
+    return X
